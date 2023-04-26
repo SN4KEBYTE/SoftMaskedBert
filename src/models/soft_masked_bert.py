@@ -1,61 +1,80 @@
-#!usr/bin/env python
-#-*- coding:utf-8 -*-
+from typing import Tuple
 
 import torch
 import torch.nn as nn
-from transformers import BertTokenizer, BertModel, BertConfig
+from transformers import BertModel, BertTokenizer
 
-from .decotor import BiGRU
+from src.models.decotor import BiGRU
 
 
 class SoftMaskedBert(nn.Module):
-    """
-    Soft-Masked Bert
-    论文：https://arxiv.org/pdf/2005.07421.pdf
-    """
-    def __init__(self, bert, tokenizer, hidden, layer_n, device):
-        super(SoftMaskedBert, self).__init__()
-        # self.bert = bert
-        # self.tokenizer = tokenizer
-        self.embedding = bert.embeddings.to(device)
-        self.config = bert.config
-        embedding_size = self.config.to_dict()['hidden_size']
+    def __init__(
+        self,
+        bert: BertModel,
+        mask_token_id: int,
+        gru_hidden_size: int,
+        gru_n_layers: int,
+        device: torch.device = torch.device('cpu'),
+    ) -> None:
+        super().__init__()
 
-        self.detector = BiGRU(embedding_size, hidden, layer_n)
+        self.config = bert.config
+        self.embedding = bert.embeddings.to(device)
         self.corrector = bert.encoder
-        mask_token_id = torch.tensor([[tokenizer.mask_token_id]]).to(device)
-        self.mask_e = self.embedding(mask_token_id)
-        self.linear = nn.Linear(embedding_size, self.config.vocab_size)
+
+        self.detector = BiGRU(
+            self.config.hidden_size,
+            gru_hidden_size,
+            gru_n_layers,
+        )
+        self.mask_e = self.embedding(torch.tensor([[mask_token_id]]).to(device))
+        self.linear = nn.Linear(
+            self.config.hidden_size,
+            self.config.vocab_size,
+        )
         self.softmax = nn.LogSoftmax(dim=-1)
 
-    def forward(self, input_ids, input_mask, segment_ids):
-        e = self.embedding(input_ids=input_ids, token_type_ids=segment_ids)
-        p = self.detector(e)
-        e_ = p * self.mask_e + (1-p) * e
-        _, _, _, _, \
-        _, \
-        head_mask, \
-        encoder_hidden_states, \
-        encoder_extended_attention_mask= self._init_inputs(input_ids, input_mask)
-        h = self.corrector(e_,
-                           attention_mask=encoder_extended_attention_mask,
-                           head_mask=head_mask,
-                           encoder_hidden_states=encoder_hidden_states,
-                           encoder_attention_mask=encoder_extended_attention_mask)
-        h = h[0] + e
-        out = self.softmax(self.linear(h))
-        return out, p
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        input_mask: torch.Tensor,
+        segment_ids: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        embedded = self.embedding(
+            input_ids=input_ids,
+            token_type_ids=segment_ids,
+        )
+        probas = self.detector(embedded)
 
-    def _init_inputs(self,
-                    input_ids=None,
-                    attention_mask=None,
-                    token_type_ids=None,
-                    position_ids=None,
-                    head_mask=None,
-                    inputs_embeds=None,
-                    encoder_hidden_states=None,
-                    encoder_attention_mask=None,
-                    ):
+        head_mask, encoder_hidden_states, encoder_extended_attention_mask = self._init_inputs(
+            input_ids,
+            input_mask,
+        )
+        hidden = self.corrector(
+            probas * self.mask_e + (1 - probas) * embedded,
+            attention_mask=encoder_extended_attention_mask,
+            head_mask=head_mask,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_extended_attention_mask
+        )
+        hidden = hidden[0] + embedded
+
+        return (
+            self.softmax(self.linear(hidden)),
+            probas,
+        )
+
+    def _init_inputs(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+    ):
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
@@ -150,20 +169,4 @@ class SoftMaskedBert(nn.Module):
         else:
             head_mask = [None] * self.config.num_hidden_layers
 
-        return input_ids, position_ids, token_type_ids, inputs_embeds, \
-               extended_attention_mask, head_mask, encoder_hidden_states, encoder_extended_attention_mask
-
-
-# if __name__ == "__main__":
-#     config = BertConfig.from_pretrained('../data/chinese_wwm_pytorch/bert_config.json')
-#     tokenizer = BertTokenizer.from_pretrained('../data/chinese_wwm_pytorch/vocab.txt')
-#     bert = BertModel.from_pretrained('../data/chinese_wwm_pytorch/pytorch_model.bin', config=config)
-#     model = SoftMaskedBert(bert, tokenizer, 2, 1)
-#     text = '中国的'
-#     token = tokenizer.tokenize(text)
-#     ids = tokenizer.convert_tokens_to_ids(token)
-#     ids = torch.Tensor([ids]).long()
-#     print(ids)
-#     out = model(ids)
-#     # out = bert(ids)
-#     print(out)
+        return head_mask, encoder_hidden_states, encoder_extended_attention_mask
