@@ -27,7 +27,7 @@ class SoftMaskedBert(nn.Module):
             gru_hidden_size,
             gru_n_layers,
         )
-        self.mask_e = self.embedding(torch.tensor([[mask_token_id]]).to(device))
+        self.mask_e = self.embedding(torch.tensor([[mask_token_id]]).to(device)).detach()
         self.linear = nn.Linear(
             self.config.hidden_size,
             self.config.vocab_size,
